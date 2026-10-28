@@ -26,7 +26,8 @@ from unaiverse.agent import Agent, action
 from concurrent.futures import ThreadPoolExecutor
 from unaiverse.networking.node.profile import NodeProfile
 from unaiverse.utils.misc import build_unaid
-from .utils import read_vote, vote_words, compute_check_in_proposals, dump_monitor_status
+from .utils import (read_vote, vote_words, compute_check_in_proposals, dump_monitor_status, remember_mates,
+                    forget_old_mates)
 if not getattr(sys, "_turing_executor", None):
     _turing_executor = ThreadPoolExecutor(max_workers=128)
     asyncio.get_event_loop().set_default_executor(_turing_executor)
@@ -62,6 +63,12 @@ class WAgent(Agent):
         # compute_check_in_proposals). Only a completed conversation counts: a guest dropped by a floor
         # (e.g., too slow to join) or disconnected never met anybody, and he can go back there
         self._previous_rooms = {}
+
+        # The people each guest shared a room with (guest -> {mate: time}): for Config.forget_mates_after
+        # seconds a guest is not sent where one of them sits, if there is another room for him (see
+        # compute_check_in_proposals). Avoiding the previous room alone is not enough: a group that leaves a
+        # room together would meet again in the next empty one, under new names, and vote knowing who is who
+        self._recent_mates = {}
 
         # Agents fake names
         self.fake_names = Room.make_fake_names(letters=Config.use_letter_names)
@@ -184,7 +191,9 @@ class WAgent(Agent):
         self._previous_rooms = {g: (r, t) for g, (r, t) in self._previous_rooms.items()
                                 if now - t < 2 * Config.test_duration}
         previous_rooms = {g: r for g, (r, _) in self._previous_rooms.items()}
-        proposed_check_ins, _ = compute_check_in_proposals(self.hotel, guests_to_check_in, previous_rooms)
+        recent_mates = forget_old_mates(self._recent_mates, now)
+        proposed_check_ins, _ = compute_check_in_proposals(self.hotel, guests_to_check_in, previous_rooms,
+                                                           recent_mates)
         log.user(f"Proposed check ins:\n {proposed_check_ins}")
         self._proposed_check_ins.update(proposed_check_ins)
         log.user(f"Merged list of proposed check ins:\n {self._proposed_check_ins}")
@@ -800,6 +809,8 @@ class WAgent(Agent):
         assert guest is not None
         floor = self.hotel.get_floor_of(guest)
         if floor is not None and floor.is_in_a_room(guest):
-            self._previous_rooms[guest] = (floor.get_room_of(guest).id, time.time())
+            room = floor.get_room_of(guest)
+            self._previous_rooms[guest] = (room.id, time.time())
+            remember_mates(self._recent_mates, guest, room.get_guests(), time.time())
         self.__eject_ahead_of_updates(guest)
         return True

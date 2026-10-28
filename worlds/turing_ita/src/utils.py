@@ -549,6 +549,7 @@ def test_floor_manager_vote_reveal():
             set_status=lambda guest, status: statuses.append(status),
             get_status=lambda guest: statuses[-1] if statuses else GuestStatus.IN_VOTING_BOOTH,
             count_human_guests=lambda: 1,
+            get_guests=lambda: {"guest": None, "bot": None},
             age=0,
         )
         room.get_time_in_current_status = lambda guest: room.age
@@ -560,6 +561,7 @@ def test_floor_manager_vote_reveal():
             return True
         manager = SimpleNamespace(floor=floor, get_peer_id=lambda: "manager", send=send,
                                   _guest2vote_info={"guest": ["vote-uuid", None, vote_form]},
+                                  _previous_rooms={}, _recent_mates={},
                                   world_agents={"guest": object()},
                                   get_stream=lambda *args, **kwargs: stream,
                                   _WAgent__eject_and_clear_guest=ejected.append)
@@ -733,6 +735,51 @@ def test_floor_assignment_packs_floors(monkeypatch):
 
     empty = Hotel(managed_guest_profiles={})
     assert compute_check_in_proposals(empty, ["waiting"]) == ({}, ["waiting"])
+
+
+def test_floor_assignment_avoids_recent_mates(monkeypatch):
+    """A group leaving a room together is split over the next rooms, a guest prefers a new room to one where
+    a recent mate sits, and old mates are better than the hall."""
+    from .hotel import Hotel
+
+    monkeypatch.setattr(Config, "max_guests_per_room", 4)
+    monkeypatch.setattr(Config, "max_overbooked_guests", 1)
+    monkeypatch.setattr(Config, "forget_mates_after", 1200)
+
+    def hotel(rooms_per_floor):
+        result = Hotel(managed_guest_profiles={})
+        result.add_floor("a", "manager-a", [f"a{i}" for i in range(rooms_per_floor)])
+        return result
+
+    # Four people who just talked together come back to the hall at once: nobody meets an old mate again
+    memory = {}
+    group = ["g0", "g1", "g2", "g3"]
+    for guest in group:
+        remember_mates(memory, guest, group, now=0.)
+    mates = forget_old_mates(memory, now=10.)
+    structure = hotel(4)
+    assigned, remaining = compute_check_in_proposals(structure, group, recent_mates=mates)
+    assert not remaining and len({p["room_id"] for p in assigned.values()}) == 4
+
+    # A new room beats a lonely old mate
+    structure = hotel(2)
+    floor = structure.get_floor("a")
+    floor.insert("g1", None, "hotel", floor.get_room("a0"), assign_fake_name=False)
+    assigned, _ = compute_check_in_proposals(structure, ["g0"], recent_mates={"g0": {"g1"}})
+    assert assigned["g0"]["room_id"] == "a1"
+
+    # ... but an old mate is better than waiting in the hall
+    structure = hotel(1)
+    floor = structure.get_floor("a")
+    floor.insert("g1", None, "hotel", floor.get_room("a0"), assign_fake_name=False)
+    assigned, remaining = compute_check_in_proposals(structure, ["g0"], recent_mates={"g0": {"g1"}})
+    assert not remaining and assigned["g0"]["room_id"] == "a0"
+
+    # Mates are forgotten after a while, in both directions
+    memory = {}
+    remember_mates(memory, "g0", ["g0", "g1"], now=0.)
+    assert forget_old_mates(memory, now=100.) == {"g0": {"g1"}, "g1": {"g0"}}
+    assert forget_old_mates(memory, now=1300.) == {} and memory == {}
 
 
 def test_vote_form_roundtrip():
@@ -1297,7 +1344,8 @@ def test_parse_vote_msg_letters():
     print(f"\n{passed}/{total} passed")
 
 
-def compute_check_in_proposals(structure, guests_to_check_in: list, previous_rooms: dict | None = None):
+def compute_check_in_proposals(structure, guests_to_check_in: list, previous_rooms: dict | None = None,
+                               recent_mates: dict | None = None):
     """Propose a room to each guest: rooms with a lonely guest first, then rooms with some free spots, then
     a new room (on the busiest floor, when the structure is the hotel), and overbooking only when there is
     no empty room left.
@@ -1310,6 +1358,10 @@ def compute_check_in_proposals(structure, guests_to_check_in: list, previous_roo
 
     previous_rooms (guest -> room ID) are the rooms the guests just left: a guest is sent back to his
     previous room only if there is no other room for him.
+
+    recent_mates (guest -> set of guests) are the people each guest talked with in his last conversations:
+    a room where one of them sits (or is about to sit) is used only if there is no other room for him, so
+    that a group leaving a room together does not meet again in the next one, under new names.
     """
     # Clearing temp room assignments (if any)
     for room in structure.get_rooms():
@@ -1322,15 +1374,23 @@ def compute_check_in_proposals(structure, guests_to_check_in: list, previous_roo
             if len(pending_guests) > 0:
                 _compute_room_check_ins(floor, pending_guests)
 
-    return _compute_room_check_ins(structure, guests_to_check_in, previous_rooms)
+    return _compute_room_check_ins(structure, guests_to_check_in, previous_rooms, recent_mates)
 
 
-def _compute_room_check_ins(structure, guests_to_check_in: list, previous_rooms: dict | None = None):
+def _compute_room_check_ins(structure, guests_to_check_in: list, previous_rooms: dict | None = None,
+                            recent_mates: dict | None = None):
     """Apply the room-filling policy without clearing reservations from this check-in cycle."""
     # Data that will be returned
     proposed_check_ins = {}  # Checked in guests (peer ID to dictionary {"floor_id": FLOOR_ID, "room_id": ROOM_ID})
     cannot_check_in = []  # Guests for which check in was not possible (no free rooms for them)
     previous_rooms = previous_rooms if previous_rooms is not None else {}
+    recent_mates = recent_mates if recent_mates is not None else {}
+
+    def has_mates_of(_room, _guest):
+        _mates = recent_mates.get(_guest)
+        if not _mates:
+            return False
+        return any(g in _mates for g in _room.get_guests()) or any(g in _mates for g in _room.temp_guests)
 
     def floor_of(_room):
         return structure.get_floor_of_room(_room.id) if hasattr(structure, "get_floor_of_room") else structure
@@ -1376,7 +1436,9 @@ def _compute_room_check_ins(structure, guests_to_check_in: list, previous_rooms:
     # Consider guests one by one, re-counting room occupation (temp assignments included) each time
     for g, guest in enumerate(guests_to_check_in):
         previous_room = previous_rooms.get(guest)
-        room = best_room([r for r in rooms if r.id != previous_room])
+        room = best_room([r for r in rooms if r.id != previous_room and not has_mates_of(r, guest)])
+        if room is None:
+            room = best_room([r for r in rooms if r.id != previous_room])  # Old mates, but somewhere else
         if room is None:
             room = best_room(rooms)  # The previous room is better than waiting in the hall
 
@@ -1389,6 +1451,27 @@ def _compute_room_check_ins(structure, guests_to_check_in: list, previous_rooms:
         room.add_temp_assignment(guest)
 
     return proposed_check_ins, cannot_check_in
+
+
+def remember_mates(mates_memory: dict, guest: str, room_guests, now: float) -> None:
+    """Record that 'guest' shared a room with 'room_guests' (both ways: the mates still in the room will
+    find him gone when their turn comes). mates_memory is guest -> {mate: time}."""
+    for mate in room_guests:
+        if mate != guest:
+            mates_memory.setdefault(guest, {})[mate] = now
+            mates_memory.setdefault(mate, {})[guest] = now
+
+
+def forget_old_mates(mates_memory: dict, now: float) -> dict:
+    """Drop the mates met more than Config.forget_mates_after seconds ago (in place), and return the
+    remaining ones as guest -> set of mates, the shape compute_check_in_proposals wants."""
+    for guest in list(mates_memory.keys()):
+        mates = {m: t for m, t in mates_memory[guest].items() if now - t < Config.forget_mates_after}
+        if len(mates) > 0:
+            mates_memory[guest] = mates
+        else:
+            del mates_memory[guest]
+    return {g: set(m.keys()) for g, m in mates_memory.items()}
 
 
 def format_message(sender_name: str, msg: str):

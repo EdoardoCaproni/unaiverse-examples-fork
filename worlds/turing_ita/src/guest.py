@@ -504,6 +504,12 @@ class WAgent(Agent):
         if self.__found_in_form_filled_list:
             return True
 
+        # Agents run by the organizers: a fixed list of accounts, no sheet to read
+        ai_nicknames = getattr(Config, "registered_ai_nicknames", None)
+        if not is_human and ai_nicknames:
+            self.__found_in_form_filled_list = nickname.strip().lower() in {n.strip().lower() for n in ai_nicknames}
+            return self.__found_in_form_filled_list
+
         if (self.clock.get_time() - self.__form_filled_list_last_check) <= 5.0:  # Try every 5s
             return False
         else:

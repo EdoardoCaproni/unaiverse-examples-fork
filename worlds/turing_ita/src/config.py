@@ -17,18 +17,24 @@
 # Generic options to configure the Turing Test Hotel
 # All time measures are in SECONDS.
 class Config:
-    skip_form_check = True # If True, the user is not required to fill the form to enter the hotel
+    skip_form_check = False  # If True, the user is not required to fill the form to enter the hotel
     form = {True: '@4TRNFkTLNUSO9lUV9UW80TM1UTMxITN4cTMuknc05WZmwmc19Fcw1DczV3PtJ3bmdXZpZ3LRFmRLFWYUFHcLx2cz1SUJRzQO'
                   'NlaNp0UsFTO1dzNzVkcJhkamxkdLJjM2lGN6plZTxUUwlUQGFzLl9CZvMXby9mZv02bj5S'
                   'Zsd2bvdmLzN2bk9yL6MHc0RHa',  # Humans
             False: '@4TRNFkTLNUSO9lUV9UW80TM1UTMxITN4cTMuknc05WZmwmc19Fcw1DczV3PtJ3bmdXZpZ3LRFmRLFWYUFHcLx2cz1SUJRzQO'
                   'NlaNp0UsFTO1dzNzVkcJhkamxkdLJjM2lGN6plZTxUUwlUQGFzLl9CZvMXby9mZv02bj5S'
                   'Zsd2bvdmLzN2bk9yL6MHc0RHa'}  # AIs (right now it is the same)
-    registered_users_form_sheets = {True: '@MmbxsWQWpXYT1EaQRTNvFnaPFVSxs2TrhjQ6p0N4gVLkVWQYlzMoFlU0EWMvQ2LzRXZlh2ckF'
-                                          'WZyB3cv02bj5SZsd2bvdmLzN2bk9yL6MHc0RHa',  # Humans
-                                    False: '@MmbxsWQWpXYT1EaQRTNvFnaPFVSxs2TrhjQ6p0N4gVLkVWQYlzMoFlU0EWMvQ2LzRXZlh2ckF'
-                                           'WZyB3cv02bj5SZsd2bvdmLzN2bk9yL6MHc0RHa'}  # AIs (right now it is the same)
+    # The humans' sheet is NOT the form responses (private): it is a public copy holding the nicknames only,
+    # in column D (IMPORTRANGE), since the guests' browsers read it directly. AIs: same sheet, unused when
+    # registered_ai_nicknames is set
+    registered_users_form_sheets = {True: '@M3aw0CZj1yV2IkNWJkSXtmSLdjNUNnYPZ3N55WSkZUQO5WUkFHekdVc'
+                                          'zRTMvQ2LzRXZlh2ckFWZyB3cv02bj5SZsd2bvdmLzN2bk9yL6MHc0RHa',  # Humans
+                                    False: '@M3aw0CZj1yV2IkNWJkSXtmSLdjNUNnYPZ3N55WSkZUQO5WUkFHekdVc'
+                                           'zRTMvQ2LzRXZlh2ckFWZyB3cv02bj5SZsd2bvdmLzN2bk9yL6MHc0RHa'}  # AIs
     registered_users_form_column_id = 3  # Zero-based column index of the nickname in the spreadsheet
+    # Registration is for humans only, and the agents are a known set run by the organizers: an artificial
+    # guest gets in if the account it runs from is listed here (empty = check the AIs' sheet above)
+    registered_ai_nicknames = []
     broadcast_when_no_humans = False
     max_message_size = 512  # Set it to <= 0 to disable
     use_letter_names = False
@@ -44,7 +50,8 @@ class Config:
     min_msgs_from_votee = 3  # Minimum number of received messages from somebody to vote hit
     msg_cooldown = 1  # Minimum time between two consecutive messages sent by a guest to the room (anti-flooding)
     max_queued_msgs = 2  # Max messages a guest can keep waiting for the cooldown (the oldest ones get dropped)
-    store_conversations = False  # Store the room conversations in the world stats DB
+    store_conversations = True  # Store the room conversations in the world stats DB
+    forget_mates_after = 1200  # A guest is kept away from the people he talked with for this long (if possible)
     msg_filter = True  # Mask bad words (and personal data) in the messages broadcast in the rooms
     msg_filter_pii = True  # Also mask e-mails, phone numbers, IBANs, fiscal codes, addresses, links
     msg_filter_max_severe = 5  # Hate speech messages a guest can send before being pushed off the floor
