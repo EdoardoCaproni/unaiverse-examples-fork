@@ -87,6 +87,7 @@ class WAgent(Agent):
         self.__hotel_manager: str | None = None  # The peer ID of the selected hotel manager
         self.__prev_hotel_manager: str | None = None
         self.__floor_manager: str | None = None  # The peer ID of the selected floor manager
+        self.__room_hint: str | None = None  # The room the hotel manager picked for us on that floor
         self.__queued_msgs: list[str] = []  # Messages waiting for the anti-flooding cooldown to expire
         self.__last_msg_sent_time: float = -1.  # When the last message was sent to the room (-1: never)
         self.__flood_warned: bool = False  # Whether the "too fast" notice was already printed in this burst
@@ -235,9 +236,10 @@ class WAgent(Agent):
         return True
 
     @action
-    async def connect_to_floor_manager(self, floor_manager: str | None = None):
+    async def connect_to_floor_manager(self, floor_manager: str | None = None, room_id: str | None = None):
         if await self.connect_to(floor_manager):
             self.__floor_manager = floor_manager
+            self.__room_hint = room_id  # The room the hotel manager picked for us (forwarded to the floor manager)
             self.reset_status()  # Resetting status to be ready for a new chat
             return True
         else:
@@ -247,7 +249,8 @@ class WAgent(Agent):
     async def send_guest_sponsor(self):
         if not await self.send(action_name="get_guest_sponsor",
                                action_kwargs={
-                                   "hotel_manager": self.__hotel_manager},
+                                   "hotel_manager": self.__hotel_manager,
+                                   "room_id": self.__room_hint},
                                from_state="getting_sponsorships",
                                target=self.__floor_manager,
                                volatile=True):

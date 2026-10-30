@@ -70,6 +70,10 @@ class WAgent(Agent):
         # room together would meet again in the next empty one, under new names, and vote knowing who is who
         self._recent_mates = {}
 
+        # The room picked for each guest sent upstairs (guest -> room ID): the guest carries it to the floor
+        # manager, which keeps it (see send_to_floor); here it reserves the seat while the guest is in flight
+        self._room_picks = {}
+
         # Agents fake names
         self.fake_names = Room.make_fake_names(letters=Config.use_letter_names)
 
@@ -192,8 +196,9 @@ class WAgent(Agent):
                                 if now - t < 2 * Config.test_duration}
         previous_rooms = {g: r for g, (r, _) in self._previous_rooms.items()}
         recent_mates = forget_old_mates(self._recent_mates, now)
+        in_flight_picks = {g: r for g, r in self._room_picks.items() if self.hotel.is_expected_guest(g)}
         proposed_check_ins, _ = compute_check_in_proposals(self.hotel, guests_to_check_in, previous_rooms,
-                                                           recent_mates)
+                                                           recent_mates, in_flight_picks)
         log.user(f"Proposed check ins:\n {proposed_check_ins}")
         self._proposed_check_ins.update(proposed_check_ins)
         log.user(f"Merged list of proposed check ins:\n {self._proposed_check_ins}")
@@ -208,10 +213,12 @@ class WAgent(Agent):
 
         items = list(proposed_check_ins.items())
 
+        # The room picked here travels with the guest (guest -> floor manager, see get_guest_sponsor): the hotel
+        # is the only one that sees all the floors, so its pick is the one that keeps recent mates apart
         # noinspection PyUnresolvedReferences
         results = await asyncio.gather(*[
             self.send(action_name="connect_to_floor_manager",
-                      action_kwargs={"floor_manager": floor.floor_manager},
+                      action_kwargs={"floor_manager": floor.floor_manager, "room_id": pc["room_id"]},
                       from_state="hall",
                       id=f"FLOOR-{guest}",  # There can be only one interaction about connecting to floor manager
                       target=guest,
@@ -228,6 +235,7 @@ class WAgent(Agent):
                 floor = self.hotel.get_floor(pc["floor_id"])
                 assert floor is not None
                 self.hotel.add_expected_guest(guest, floor)
+                self._room_picks[guest] = pc["room_id"]
                 self._last_guest_send_to_floor_at = self.clock.get_time_as_string()
                 at_least_one_sent = True
 
@@ -812,5 +820,6 @@ class WAgent(Agent):
             room = floor.get_room_of(guest)
             self._previous_rooms[guest] = (room.id, time.time())
             remember_mates(self._recent_mates, guest, room.get_guests(), time.time())
+        self._room_picks.pop(guest, None)
         self.__eject_ahead_of_updates(guest)
         return True

@@ -34,7 +34,7 @@ class Config:
     registered_users_form_column_id = 3  # Zero-based column index of the nickname in the spreadsheet
     # Registration is for humans only, and the agents are a known set run by the organizers: an artificial
     # guest gets in if the account it runs from is listed here (empty = check the AIs' sheet above)
-    registered_ai_nicknames = []
+    registered_ai_nicknames = ["jolly-mayer", "angry-galois"]
     broadcast_when_no_humans = False
     max_message_size = 512  # Set it to <= 0 to disable
     use_letter_names = False
@@ -60,7 +60,7 @@ class Config:
     send_floor_updates_every = 3  # From floor manager to hotel manager
     monitor_dir = "~/.cache/unaiverse/turing_ita_monitor"  # Managers dump their status here for the monitor TUI ("" = off)
     monitor_every = 2  # Seconds between two status dumps of a manager
-    decompression_time = 90
+    decompression_time = 20  # Pause before retrying, only after a manager did not answer the handshake
     disconnect_non_responsive_managers_after = 30  # When "connect" is triggered, time to wait for the handshake
     exit_trigger_message = "exit"  # The message that an agent can write to early stop the conversation and vote
     manager_fake_name = "MANAGER"

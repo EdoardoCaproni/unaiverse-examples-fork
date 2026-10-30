@@ -30,7 +30,7 @@ from unaiverse.streams.dataprops import DataProps
 from concurrent.futures import ThreadPoolExecutor
 from .filter import RuleBasedFilter
 from .utils import (build_vote_result_wire, build_survey_wire, compute_check_in_proposals, dump_monitor_status,
-                    format_message, sanitize_room_message, remember_mates, forget_old_mates)
+                    format_message, sanitize_room_message)
 if not getattr(sys, "_turing_executor", None):
     _turing_executor = ThreadPoolExecutor(max_workers=128)
     asyncio.get_event_loop().set_default_executor(_turing_executor)
@@ -74,12 +74,10 @@ class WAgent(Agent):
         # in which they communicate who is their hotel manager)
         self._sponsored_guests = {}
 
-        # The room each guest last talked in (guest -> (room id, time)) and the people he talked with there
-        # (guest -> {mate: time}). The hotel manager follows the same policy, but it only picks the floor: the
-        # room is picked here, so a guest coming back to this floor would otherwise land again in the room
-        # he just left, or with the same group (see compute_check_in_proposals)
-        self._previous_rooms = {}
-        self._recent_mates = {}
+        # The room the hotel manager picked for each sponsored guest (guest -> room ID). Only the hotel manager
+        # sees all the floors and remembers who met whom (a floor forgets a guest as soon as he leaves it), so
+        # its pick wins whenever the room can still take him (see compute_check_in_proposals)
+        self._room_hints = {}
 
         # Attributes that handle some guest-status related info
         self._guest2vote_info = {}  # Guest who got the survey -> [UUID of the request, vote dict, vote form]
@@ -316,16 +314,13 @@ class WAgent(Agent):
         if isinstance(g_ret, Exception) or not g_ret:
             await self.disconnect(guest)
 
-        # Remembering where he talked and with whom, then clearing guest from floor
-        room = self.floor.get_room_of(guest) if self.floor.is_in_a_room(guest) else None
-        if room is not None:
-            self._previous_rooms[guest] = (room.id, time.time())
-            remember_mates(self._recent_mates, guest, room.get_guests(), time.time())
+        # Clearing guest from floor
         self.__eject_and_clear_guest(guest)  # Send him out and clear all his info (but not the vote-info)
         return True
 
     @action
-    async def get_guest_sponsor(self, hotel_manager: str | None = None, interaction: Interaction | None = None):
+    async def get_guest_sponsor(self, hotel_manager: str | None = None, room_id: str | None = None,
+                                interaction: Interaction | None = None):
         if hotel_manager is None or hotel_manager not in self.world_agents or interaction is None:
             return True  # Always return True to burn the interaction
 
@@ -334,6 +329,10 @@ class WAgent(Agent):
         role = self.get_role(guest)
         if role == "guest":
             self._sponsored_guests[guest] = hotel_manager  # Check-in order will follow the order in this dict, FIFO
+            if room_id is not None:
+                self._room_hints[guest] = room_id
+            elif guest in self._room_hints:
+                del self._room_hints[guest]
         return True
 
     @action
@@ -353,13 +352,8 @@ class WAgent(Agent):
 
         # Proposing check-ins accordingly to the current status of the hotel
         # If there is no room left, some guests will be reconsidered in the future
-        now = time.time()
-        self._previous_rooms = {g: (r, t) for g, (r, t) in self._previous_rooms.items()
-                                if now - t < 2 * Config.test_duration}
-        previous_rooms = {g: r for g, (r, _) in self._previous_rooms.items()}
-        recent_mates = forget_old_mates(self._recent_mates, now)
-        proposed_check_ins, _ = compute_check_in_proposals(self.floor, guests_to_check_in, previous_rooms,
-                                                           recent_mates)
+        proposed_check_ins, _ = compute_check_in_proposals(self.floor, guests_to_check_in,
+                                                           room_hints=self._room_hints)
         log.user(f"Proposed check ins:\n {proposed_check_ins}")
         self._proposed_check_ins.update(proposed_check_ins)
         log.user(f"Merged list of proposed check ins:\n {self._proposed_check_ins}")
@@ -914,6 +908,8 @@ class WAgent(Agent):
 
         if guest in self._sponsored_guests:
             del self._sponsored_guests[guest]
+        if guest in self._room_hints:
+            del self._room_hints[guest]
         if guest in self._wants_to_exit:
             self._wants_to_exit.remove(guest)
         if guest in self._guest2reminder_time:

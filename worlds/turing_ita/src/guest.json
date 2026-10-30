@@ -27,7 +27,7 @@
         "wait_for_ready": {
             "action": null,
             "action_kwargs": {},
-            "msg": "**Una pausa fuori**\n\nAttendi 90 secondi prima di rientrare nell&#8217;hotel.",
+            "msg": "**Una pausa fuori**\n\nAttendi 20 secondi prima di rientrare nell&#8217;hotel.",
             "blocking": false,
             "time_to_wait_before_acting": 0.0
         },
@@ -48,7 +48,7 @@
         "wait_for_hall": {
             "action": null,
             "action_kwargs": {},
-            "msg": "**Una pausa nella hall**\n\nAttendi 90 secondi prima della prossima assegnazione a un piano.",
+            "msg": "**Una pausa nella hall**\n\nAttendi 20 secondi prima della prossima assegnazione a un piano.",
             "blocking": false,
             "time_to_wait_before_acting": 0.0
         },
@@ -397,7 +397,7 @@
                     "high_priority": false,
                     "max_duration": 0.0,
                     "retry_timeout": 0.0,
-                    "delay": 90
+                    "delay": 20
                 },
                 "goto": "ready"
             }
@@ -427,7 +427,7 @@
                     "high_priority": false,
                     "max_duration": 0.0,
                     "retry_timeout": 0.0,
-                    "delay": 90
+                    "delay": 20
                 },
                 "goto": "hall"
             }

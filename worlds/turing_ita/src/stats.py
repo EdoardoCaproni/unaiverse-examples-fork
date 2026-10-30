@@ -459,8 +459,15 @@ class WStats(Stats):
         """
         Per-voter stats using binary classification metrics.
         Positive class = "human". Sorted by detection_score descending.
-        detection_score = f1 * votes / (votes + K) with K=10 — rewards
+        detection_score = balanced_accuracy * votes / (votes + K) with K=10 — rewards
         sustained accuracy over many votes, mirroring the Turing score.
+
+        balanced_accuracy = (TP / humans met + TN / AIs met) / 2 (only the available term when a
+        voter met one nature only). It replaces F1 in the score because F1 gives no credit for the
+        AIs recognized as AIs: when the rooms are mostly human, voting everybody "human" gets a high
+        F1 (e.g. 85.7 with 30 humans and 10 AIs, the same of a voter right 80% of the times), while
+        its balanced accuracy is 50 whatever the mix. With as many humans as AIs the two agree.
+        Precision, recall and F1 are still reported.
         
         Atomic votes are grouped by the votee's UNaID and the dict has the following structure:
         {
@@ -519,6 +526,11 @@ class WStats(Stats):
             )
             return _prec, _rec_, _f1
 
+        def _balanced_accuracy(tp: int, fp: int, tn: int, fn: int) -> float | None:
+            _rates = [r for r in (tp / (tp + fn) if (tp + fn) else None,
+                                  tn / (tn + fp) if (tn + fp) else None) if r is not None]
+            return sum(_rates) / len(_rates) if _rates else None
+
         def _fmt(v: float | None) -> str:
             return f"{v * 100:.1f}" if v is not None else None  # type: ignore[return-value]
 
@@ -534,7 +546,8 @@ class WStats(Stats):
             if e_total < min_votes:
                 continue
             prec, rec_, f1 = _prf(e_tp, e_fp, e_tn, e_fn)
-            raw_detection = (f1 * e_total / (e_total + _K)) if f1 is not None else None
+            bal_acc = _balanced_accuracy(e_tp, e_fp, e_tn, e_fn)
+            raw_detection = (bal_acc * e_total / (e_total + _K)) if bal_acc is not None else None
             sort_detection = raw_detection if raw_detection is not None else -1.0
             rows.append({
                 "peer_id":         vid,
@@ -543,6 +556,7 @@ class WStats(Stats):
                 "precision":       _fmt(prec),
                 "recall":          _fmt(rec_),
                 "f1":              _fmt(f1),
+                "balanced_accuracy": _fmt(bal_acc),
                 "detection_score": round(raw_detection * 100, 1) if raw_detection is not None else None,
                 "_sort_detection": sort_detection,
             })

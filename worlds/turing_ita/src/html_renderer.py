@@ -952,7 +952,8 @@ tr.gridjs-tr:hover td.gridjs-td{{
     {{id:'precision',       name:colName('Precision %','Of all peers this voter classified as human, what fraction actually were'), sort:true, formatter:fmtNull}},
     {{id:'recall',          name:colName('Recall %','Of all actual humans, what fraction this voter correctly identified'), sort:true, formatter:fmtNull}},
     {{id:'f1',              name:colName('F1 %','Harmonic mean of precision and recall'), sort:true, formatter:fmtNull}},
-    {{id:'detection_score', name:colName('Detection score','f1 \u00d7 votes / (votes + 10). Rewards sustained detection accuracy over many votes.'), sort:true, formatter:fmtNull}},
+    {{id:'balanced_accuracy', name:colName('Balanced acc. %','Average of the humans recognized as humans and the AIs recognized as AIs: voting everybody human scores 50%, however many humans there are'), sort:true, formatter:fmtNull}},
+    {{id:'detection_score', name:colName('Detection score','balanced accuracy \u00d7 votes / (votes + 10). Rewards sustained detection accuracy over many votes.'), sort:true, formatter:fmtNull}},
   ];
 
   /* ═══════════════════════════════════════════════════

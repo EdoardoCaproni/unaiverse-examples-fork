@@ -775,11 +775,87 @@ def test_floor_assignment_avoids_recent_mates(monkeypatch):
     assigned, remaining = compute_check_in_proposals(structure, ["g0"], recent_mates={"g0": {"g1"}})
     assert not remaining and assigned["g0"]["room_id"] == "a0"
 
+    # The floor takes the room the hotel picked, even when its own policy would choose another one...
+    structure = hotel(2)
+    floor = structure.get_floor("a")
+    floor.insert("g1", None, "hotel", floor.get_room("a0"), assign_fake_name=False)
+    assigned, _ = compute_check_in_proposals(floor, ["g0"], room_hints={"g0": "a1"})
+    assert assigned["g0"]["room_id"] == "a1"  # Without the hint: a0, the lonely room
+
+    # ... the hinted guests go first, so nobody takes their seats...
+    monkeypatch.setattr(Config, "max_guests_per_room", 2)
+    monkeypatch.setattr(Config, "max_overbooked_guests", 0)
+    for _ in range(10):  # "other" alone would pick a1 (a lonely guest is there), filling it before g0
+        structure = hotel(2)
+        floor = structure.get_floor("a")
+        floor.insert("x", None, "hotel", floor.get_room("a1"), assign_fake_name=False)
+        assigned, remaining = compute_check_in_proposals(floor, ["other", "g0"], room_hints={"g0": "a1"})
+        assert assigned["g0"]["room_id"] == "a1" and assigned["other"]["room_id"] == "a0" and not remaining
+
+    # ... but a full or unknown hinted room falls back to the floor policy
+    floor.insert("g1", None, "hotel", floor.get_room("a1"), assign_fake_name=False)
+    assigned, _ = compute_check_in_proposals(floor, ["g0"], room_hints={"g0": "a1"})
+    assert assigned["g0"]["room_id"] == "a0"
+    structure = hotel(2)
+    assigned, _ = compute_check_in_proposals(structure.get_floor("a"), ["g0"], room_hints={"g0": "gone"})
+    assert assigned["g0"]["room_id"] in ("a0", "a1")
+    monkeypatch.setattr(Config, "max_guests_per_room", 4)
+    monkeypatch.setattr(Config, "max_overbooked_guests", 1)
+
+    # End to end, several floors with several rooms: the hotel splits a group that talked together, and each
+    # floor, given the hotel's picks, puts the guests exactly there (no floor sees the others)
+    structure = Hotel(managed_guest_profiles={})
+    structure.add_floor("a", "manager-a", ["a0", "a1"])
+    structure.add_floor("b", "manager-b", ["b0", "b1"])
+    floor_a = structure.get_floor("a")
+    floor_a.insert("busy", None, "hotel", floor_a.get_room("a0"), assign_fake_name=False)  # Floor a is the busiest
+    memory = {}
+    for guest in group:
+        remember_mates(memory, guest, group, now=0.)
+    picks, remaining = compute_check_in_proposals(structure, group, recent_mates=forget_old_mates(memory, 1.))
+    assert not remaining and len({p["room_id"] for p in picks.values()}) == 4
+    for floor_id in ("a", "b"):
+        mirror = Hotel(managed_guest_profiles={})
+        mirror.add_floor(floor_id, f"manager-{floor_id}", [f"{floor_id}0", f"{floor_id}1"])
+        mirror_floor = mirror.get_floor(floor_id)
+        if floor_id == "a":
+            mirror_floor.insert("busy", None, "hotel", mirror_floor.get_room("a0"), assign_fake_name=False)
+        sent_here = [g for g, p in picks.items() if p["floor_id"] == floor_id]
+        hints = {g: picks[g]["room_id"] for g in sent_here}
+        assigned, _ = compute_check_in_proposals(mirror_floor, sent_here, room_hints=hints)
+        assert {g: p["room_id"] for g, p in assigned.items()} == hints
+
     # Mates are forgotten after a while, in both directions
     memory = {}
     remember_mates(memory, "g0", ["g0", "g1"], now=0.)
     assert forget_old_mates(memory, now=100.) == {"g0": {"g1"}, "g1": {"g0"}}
     assert forget_old_mates(memory, now=1300.) == {} and memory == {}
+
+
+def test_voter_score_is_not_fooled_by_always_human():
+    """With mostly human rooms, voting everybody "human" must not beat a voter who actually tells humans and
+    AIs apart; with as many humans as AIs, the score keeps ranking voters by how often they are right."""
+    from .stats import WStats
+
+    def voter(name, humans, ais, right_on_humans, right_on_ais):
+        def vote(gt, vote):
+            return {"voter": name, "voter_nature": "human", "ground_truth": gt, "vote": vote}
+        return ([vote("human", "human")] * right_on_humans + [vote("human", "ai")] * (humans - right_on_humans) +
+                [vote("ai", "ai")] * right_on_ais + [vote("ai", "human")] * (ais - right_on_ais))
+
+    for humans, ais in ((30, 10), (32, 8), (20, 20)):
+        votes = (voter("always-human", humans, ais, humans, 0) +
+                 voter("right-80", humans, ais, round(.8 * humans), round(.8 * ais)) +
+                 voter("all-bots-75", humans, ais, round(.75 * humans), ais))
+        rows = {r["peer_id"]: r for r in WStats._compute_voter_leaderboard(votes, 1)}
+        assert rows["always-human"]["balanced_accuracy"] == "50.0"
+        assert rows["always-human"]["detection_score"] < rows["right-80"]["detection_score"]
+        assert rows["always-human"]["detection_score"] < rows["all-bots-75"]["detection_score"]
+        assert rows["always-human"]["f1"] is not None  # Still reported
+
+    # A voter who met humans only is judged on them only
+    rows = WStats._compute_voter_leaderboard(voter("humans-only", 10, 0, 9, 0), 1)
+    assert rows[0]["balanced_accuracy"] == "90.0"
 
 
 def test_vote_form_roundtrip():
@@ -1345,7 +1421,7 @@ def test_parse_vote_msg_letters():
 
 
 def compute_check_in_proposals(structure, guests_to_check_in: list, previous_rooms: dict | None = None,
-                               recent_mates: dict | None = None):
+                               recent_mates: dict | None = None, room_hints: dict | None = None):
     """Propose a room to each guest: rooms with a lonely guest first, then rooms with some free spots, then
     a new room (on the busiest floor, when the structure is the hotel), and overbooking only when there is
     no empty room left.
@@ -1362,6 +1438,11 @@ def compute_check_in_proposals(structure, guests_to_check_in: list, previous_roo
     recent_mates (guest -> set of guests) are the people each guest talked with in his last conversations:
     a room where one of them sits (or is about to sit) is used only if there is no other room for him, so
     that a group leaving a room together does not meet again in the next one, under new names.
+
+    room_hints (guest -> room ID) are rooms already picked for some guests by the hotel manager, the only
+    one that sees all the floors and remembers who met whom: a hinted room is taken as it is, as long as it
+    can still accept the guest (otherwise the policy above picks another one). The floor manager gets them
+    from the guests; the hotel manager uses its own picks to reserve the seats of the guests in flight.
     """
     # Clearing temp room assignments (if any)
     for room in structure.get_rooms():
@@ -1372,19 +1453,25 @@ def compute_check_in_proposals(structure, guests_to_check_in: list, previous_roo
         for floor in structure.get_floors():
             pending_guests = sorted(set(floor.get_expected_guests()) - set(floor.get_guests()))
             if len(pending_guests) > 0:
-                _compute_room_check_ins(floor, pending_guests)
+                _compute_room_check_ins(floor, pending_guests, room_hints=room_hints)
 
-    return _compute_room_check_ins(structure, guests_to_check_in, previous_rooms, recent_mates)
+    return _compute_room_check_ins(structure, guests_to_check_in, previous_rooms, recent_mates, room_hints)
 
 
 def _compute_room_check_ins(structure, guests_to_check_in: list, previous_rooms: dict | None = None,
-                            recent_mates: dict | None = None):
+                            recent_mates: dict | None = None, room_hints: dict | None = None):
     """Apply the room-filling policy without clearing reservations from this check-in cycle."""
     # Data that will be returned
     proposed_check_ins = {}  # Checked in guests (peer ID to dictionary {"floor_id": FLOOR_ID, "room_id": ROOM_ID})
     cannot_check_in = []  # Guests for which check in was not possible (no free rooms for them)
     previous_rooms = previous_rooms if previous_rooms is not None else {}
     recent_mates = recent_mates if recent_mates is not None else {}
+    room_hints = room_hints if room_hints is not None else {}
+
+    def can_take_one_more(_room):
+        _count = _room.count_guests(count_temp_too=True)
+        return ((_count == 0 or not _room.are_fake_names_clashing()) and
+                _count < Config.max_guests_per_room + Config.max_overbooked_guests)
 
     def has_mates_of(_room, _guest):
         _mates = recent_mates.get(_guest)
@@ -1429,12 +1516,21 @@ def _compute_room_check_ins(structure, guests_to_check_in: list, previous_rooms:
             return min(_overbooked, key=lambda r: r.count_guests(count_temp_too=True))
         return None
 
-    # Shuffling guests waiting in the hall and rooms (rooms order breaks ties)
+    # Shuffling guests waiting in the hall and rooms (rooms order breaks ties); the guests with a hinted room
+    # come first, so that the others cannot take the seats the hotel manager already promised
     guests_to_check_in = random.sample(guests_to_check_in, len(guests_to_check_in))
+    guests_to_check_in.sort(key=lambda _g: _g not in room_hints)
     rooms = random.sample(list(structure.get_rooms()), len(structure.rooms))
 
     # Consider guests one by one, re-counting room occupation (temp assignments included) each time
+    rooms_by_id = {r.id: r for r in rooms}
     for g, guest in enumerate(guests_to_check_in):
+        hinted_room = rooms_by_id.get(room_hints.get(guest))
+        if hinted_room is not None and can_take_one_more(hinted_room):
+            proposed_check_ins[guest] = {"floor_id": floor_of(hinted_room).id, "room_id": hinted_room.id}
+            hinted_room.add_temp_assignment(guest)
+            continue
+
         previous_room = previous_rooms.get(guest)
         room = best_room([r for r in rooms if r.id != previous_room and not has_mates_of(r, guest)])
         if room is None:
