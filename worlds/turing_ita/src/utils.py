@@ -832,6 +832,72 @@ def test_floor_assignment_avoids_recent_mates(monkeypatch):
     assert forget_old_mates(memory, now=1300.) == {} and memory == {}
 
 
+def test_room_pick_travels_hotel_guest_floor(monkeypatch):
+    """The room picked by the hotel manager reaches the floor manager through the guest's actions, and the
+    floor manager checks the guest in there, even when its own policy would pick another room."""
+    import asyncio
+    from types import SimpleNamespace
+    from .hotel import Hotel
+    from .floor import Floor
+
+    async def load_roles():
+        # The roles install their executor at import time, so import them inside a live loop
+        from .hotel_manager import WAgent as HotelManager
+        from .floor_manager import WAgent as FloorManager
+        from .guest import WAgent as Guest
+        return HotelManager, FloorManager, Guest
+    HotelManager, FloorManager, Guest = asyncio.run(load_roles())
+    monkeypatch.setattr(Config, "rooms_per_floor", 2)
+
+    # The floor as its manager sees it: a lonely guest in one room (where the policy would send anybody)
+    floor = Floor(floor_manager="fm", id="a", managed_guest_profiles={})
+    lonely_room, picked_room = list(floor.rooms.values())
+    floor.insert("lonely", None, "hm", lonely_room, assign_fake_name=False)
+
+    # Hotel manager: the pick goes out with the floor manager and is remembered for the seat reservation
+    sent = []
+
+    async def send(**kwargs):
+        sent.append(kwargs)
+        return True
+    hotel = Hotel(managed_guest_profiles={})
+    hotel.add_floor("a", "fm", [r.id for r in floor.get_rooms()])
+    hm = SimpleNamespace(_proposed_check_ins={"g": {"floor_id": "a", "room_id": picked_room.id}}, hotel=hotel,
+                         _room_picks={}, send=send, disconnect=None,
+                         clock=SimpleNamespace(get_time_as_string=lambda: "now"))
+    assert asyncio.run(HotelManager.send_to_floor(hm)) is True
+    assert sent[0]["action_kwargs"] == {"floor_manager": "fm", "room_id": picked_room.id}
+    assert hm._room_picks == {"g": picked_room.id}
+
+    # Guest: keeps the pick and forwards it to the floor manager
+    sent.clear()
+
+    async def connect_to(_peer):
+        return True
+    guest = SimpleNamespace(connect_to=connect_to, reset_status=lambda: None, send=send,
+                            _WAgent__hotel_manager="hm", disconnect_floor_manager=None)
+    assert asyncio.run(Guest.connect_to_floor_manager(guest, floor_manager="fm", room_id=picked_room.id))
+    assert asyncio.run(Guest.send_guest_sponsor(guest)) is True
+    assert sent[0]["action_name"] == "get_guest_sponsor" and sent[0]["target"] == "fm"
+    assert sent[0]["action_kwargs"] == {"hotel_manager": "hm", "room_id": picked_room.id}
+
+    # Floor manager: stores the pick and honors it at check-in
+    fm = SimpleNamespace(world_agents={"hm": object()}, get_role=lambda _g: "guest", floor=floor,
+                         _sponsored_guests={}, _room_hints={}, _proposed_check_ins={})
+    assert asyncio.run(FloorManager.get_guest_sponsor(fm, interaction=SimpleNamespace(requester="g"),
+                                                      **sent[0]["action_kwargs"])) is True
+    assert fm._room_hints == {"g": picked_room.id}
+    assert asyncio.run(FloorManager.check_in(fm)) is True
+    assert fm._proposed_check_ins["g"]["room_id"] == picked_room.id
+
+    # A guest running older code (no room in the sponsorship) is placed by the floor policy, as before
+    fm._room_hints, fm._proposed_check_ins = {}, {}
+    assert asyncio.run(FloorManager.get_guest_sponsor(fm, hotel_manager="hm",
+                                                      interaction=SimpleNamespace(requester="g"))) is True
+    assert fm._room_hints == {} and asyncio.run(FloorManager.check_in(fm)) is True
+    assert fm._proposed_check_ins["g"]["room_id"] == lonely_room.id
+
+
 def test_voter_score_is_not_fooled_by_always_human():
     """With mostly human rooms, voting everybody "human" must not beat a voter who actually tells humans and
     AIs apart; with as many humans as AIs, the score keeps ranking voters by how often they are right."""
