@@ -738,8 +738,10 @@ def test_floor_assignment_packs_floors(monkeypatch):
 
 
 def test_floor_assignment_avoids_recent_mates(monkeypatch):
-    """A group leaving a room together is split over the next rooms, a guest prefers a new room to one where
-    a recent mate sits, and old mates are better than the hall."""
+    """A group leaving a room together is spread over the rooms already filling up, but nobody opens a new
+    room or waits alone to avoid an old mate: when everybody has met everybody, rooms fill as without the
+    memory. Old mates are better than the hall, and forget_mates_after = 0 turns the memory off."""
+    from collections import Counter
     from .hotel import Hotel
 
     monkeypatch.setattr(Config, "max_guests_per_room", 4)
@@ -751,22 +753,48 @@ def test_floor_assignment_avoids_recent_mates(monkeypatch):
         result.add_floor("a", "manager-a", [f"a{i}" for i in range(rooms_per_floor)])
         return result
 
-    # Four people who just talked together come back to the hall at once: nobody meets an old mate again
+    # Four people who just talked together come back to the hall at once, while four other people wait
+    # alone in four rooms: each of the four joins a different one, nobody meets an old mate again
     memory = {}
     group = ["g0", "g1", "g2", "g3"]
     for guest in group:
         remember_mates(memory, guest, group, now=0.)
     mates = forget_old_mates(memory, now=10.)
     structure = hotel(4)
+    floor = structure.get_floor("a")
+    for i in range(4):
+        floor.insert(f"waiting{i}", None, "hotel", floor.get_room(f"a{i}"), assign_fake_name=False)
     assigned, remaining = compute_check_in_proposals(structure, group, recent_mates=mates)
     assert not remaining and len({p["room_id"] for p in assigned.values()}) == 4
 
-    # A new room beats a lonely old mate
+    # Among occupied rooms, one without old mates comes first, even if it is busier
+    structure = hotel(3)
+    floor = structure.get_floor("a")
+    floor.insert("g1", None, "hotel", floor.get_room("a0"), assign_fake_name=False)
+    for other in ("x", "y"):
+        floor.insert(other, None, "hotel", floor.get_room("a1"), assign_fake_name=False)
+    assigned, _ = compute_check_in_proposals(structure, ["g0"], recent_mates={"g0": {"g1"}})
+    assert assigned["g0"]["room_id"] == "a1"
+
+    # ... but a lonely old mate beats a new room: nobody waits alone to avoid somebody
     structure = hotel(2)
     floor = structure.get_floor("a")
     floor.insert("g1", None, "hotel", floor.get_room("a0"), assign_fake_name=False)
     assigned, _ = compute_check_in_proposals(structure, ["g0"], recent_mates={"g0": {"g1"}})
-    assert assigned["g0"]["room_id"] == "a1"
+    assert assigned["g0"]["room_id"] == "a0"
+
+    # Few people who have all met each other, many empty rooms (one room per floor): they fill rooms as
+    # without the memory, nobody is left alone in a room of his own
+    people = [f"p{i}" for i in range(6)]
+    memory = {}
+    for guest in people:
+        remember_mates(memory, guest, people, now=0.)
+    structure = Hotel(managed_guest_profiles={})
+    for i in range(6):
+        structure.add_floor(f"f{i}", f"manager-f{i}", [f"r{i}"])
+    assigned, remaining = compute_check_in_proposals(structure, people, recent_mates=forget_old_mates(memory, 1.))
+    room_sizes = sorted(Counter(p["room_id"] for p in assigned.values()).values())
+    assert not remaining and room_sizes == [2, 4]
 
     # ... but an old mate is better than waiting in the hall
     structure = hotel(1)
@@ -802,13 +830,16 @@ def test_floor_assignment_avoids_recent_mates(monkeypatch):
     monkeypatch.setattr(Config, "max_guests_per_room", 4)
     monkeypatch.setattr(Config, "max_overbooked_guests", 1)
 
-    # End to end, several floors with several rooms: the hotel splits a group that talked together, and each
-    # floor, given the hotel's picks, puts the guests exactly there (no floor sees the others)
+    # End to end, several floors with several rooms: the hotel splits a group that talked together over the
+    # rooms where somebody waits, and each floor, given the hotel's picks, puts the guests exactly there (no
+    # floor sees the others)
     structure = Hotel(managed_guest_profiles={})
     structure.add_floor("a", "manager-a", ["a0", "a1"])
     structure.add_floor("b", "manager-b", ["b0", "b1"])
-    floor_a = structure.get_floor("a")
-    floor_a.insert("busy", None, "hotel", floor_a.get_room("a0"), assign_fake_name=False)  # Floor a is the busiest
+    waiting = {"a0": "wa0", "a1": "wa1", "b0": "wb0", "b1": "wb1"}
+    for room_id, other in waiting.items():
+        floor = structure.get_floor(room_id[0])
+        floor.insert(other, None, "hotel", floor.get_room(room_id), assign_fake_name=False)
     memory = {}
     for guest in group:
         remember_mates(memory, guest, group, now=0.)
@@ -818,8 +849,8 @@ def test_floor_assignment_avoids_recent_mates(monkeypatch):
         mirror = Hotel(managed_guest_profiles={})
         mirror.add_floor(floor_id, f"manager-{floor_id}", [f"{floor_id}0", f"{floor_id}1"])
         mirror_floor = mirror.get_floor(floor_id)
-        if floor_id == "a":
-            mirror_floor.insert("busy", None, "hotel", mirror_floor.get_room("a0"), assign_fake_name=False)
+        for room_id in (f"{floor_id}0", f"{floor_id}1"):
+            mirror_floor.insert(waiting[room_id], None, "hotel", mirror_floor.get_room(room_id), assign_fake_name=False)
         sent_here = [g for g, p in picks.items() if p["floor_id"] == floor_id]
         hints = {g: picks[g]["room_id"] for g in sent_here}
         assigned, _ = compute_check_in_proposals(mirror_floor, sent_here, room_hints=hints)
@@ -830,6 +861,12 @@ def test_floor_assignment_avoids_recent_mates(monkeypatch):
     remember_mates(memory, "g0", ["g0", "g1"], now=0.)
     assert forget_old_mates(memory, now=100.) == {"g0": {"g1"}, "g1": {"g0"}}
     assert forget_old_mates(memory, now=1300.) == {} and memory == {}
+
+    # forget_mates_after = 0: nothing is remembered, nobody is kept apart
+    monkeypatch.setattr(Config, "forget_mates_after", 0)
+    memory = {}
+    remember_mates(memory, "g0", ["g0", "g1"], now=0.)
+    assert memory == {} and forget_old_mates({"g0": {"g1": 0.}}, now=1.) == {}
 
 
 def test_room_pick_travels_hotel_guest_floor(monkeypatch):
@@ -1502,8 +1539,10 @@ def compute_check_in_proposals(structure, guests_to_check_in: list, previous_roo
     previous room only if there is no other room for him.
 
     recent_mates (guest -> set of guests) are the people each guest talked with in his last conversations:
-    a room where one of them sits (or is about to sit) is used only if there is no other room for him, so
-    that a group leaving a room together does not meet again in the next one, under new names.
+    among the rooms where somebody already sits (or is about to sit), one without them is preferred, so that
+    a group leaving a room together is spread over the rooms that are already filling up. It is only a
+    preference among occupied rooms: a guest never opens a new room, nor leaves somebody waiting alone, to
+    avoid an old mate. With few people, where everybody has met everybody, it must not keep anybody apart.
 
     room_hints (guest -> room ID) are rooms already picked for some guests by the hotel manager, the only
     one that sees all the floors and remembers who met whom: a hinted room is taken as it is, as long as it
@@ -1556,7 +1595,7 @@ def _compute_room_check_ins(structure, guests_to_check_in: list, previous_rooms:
         _floor = floor_of(_room)
         return -sum(r.count_guests(count_temp_too=True) for r in _floor.get_rooms()), _floor.floor_manager
 
-    def best_room(_rooms):
+    def best_room(_rooms, _guest):
         """The room with the highest priority (None if no room can accept a guest)."""
         _lonely, _free, _empty, _overbooked = [], [], [], []
         for _room in _rooms:
@@ -1572,8 +1611,11 @@ def _compute_room_check_ins(structure, guests_to_check_in: list, previous_rooms:
             elif _count < Config.max_guests_per_room + Config.max_overbooked_guests:
                 _overbooked.append(_room)
 
-        # Guests are spread over the rooms of the same kind (the less crowded first, ties are random)
-        for _candidates in (_lonely, _free):
+        # Guests are spread over the rooms of the same kind (the less crowded first, ties are random). Recent
+        # mates only reorder the occupied rooms: a lonely or free room with one of them still comes before a
+        # new room, otherwise a guest who has met everybody would wait alone, and so would the next one
+        _clear = [r for r in _lonely + _free if not has_mates_of(r, _guest)]
+        for _candidates in ([r for r in _lonely if r in _clear], [r for r in _free if r in _clear], _lonely, _free):
             if len(_candidates) > 0:
                 return min(_candidates, key=lambda r: r.count_guests(count_temp_too=True))
         if len(_empty) > 0:
@@ -1598,11 +1640,9 @@ def _compute_room_check_ins(structure, guests_to_check_in: list, previous_rooms:
             continue
 
         previous_room = previous_rooms.get(guest)
-        room = best_room([r for r in rooms if r.id != previous_room and not has_mates_of(r, guest)])
+        room = best_room([r for r in rooms if r.id != previous_room], guest)
         if room is None:
-            room = best_room([r for r in rooms if r.id != previous_room])  # Old mates, but somewhere else
-        if room is None:
-            room = best_room(rooms)  # The previous room is better than waiting in the hall
+            room = best_room(rooms, guest)  # The previous room is better than waiting in the hall
 
         # No ways, no spots left at all
         if room is None:
@@ -1617,7 +1657,10 @@ def _compute_room_check_ins(structure, guests_to_check_in: list, previous_rooms:
 
 def remember_mates(mates_memory: dict, guest: str, room_guests, now: float) -> None:
     """Record that 'guest' shared a room with 'room_guests' (both ways: the mates still in the room will
-    find him gone when their turn comes). mates_memory is guest -> {mate: time}."""
+    find him gone when their turn comes). mates_memory is guest -> {mate: time}. Nothing is recorded when
+    Config.forget_mates_after is 0 (or less): the mechanism is off."""
+    if Config.forget_mates_after <= 0:
+        return
     for mate in room_guests:
         if mate != guest:
             mates_memory.setdefault(guest, {})[mate] = now
@@ -1626,7 +1669,11 @@ def remember_mates(mates_memory: dict, guest: str, room_guests, now: float) -> N
 
 def forget_old_mates(mates_memory: dict, now: float) -> dict:
     """Drop the mates met more than Config.forget_mates_after seconds ago (in place), and return the
-    remaining ones as guest -> set of mates, the shape compute_check_in_proposals wants."""
+    remaining ones as guest -> set of mates, the shape compute_check_in_proposals wants. With
+    Config.forget_mates_after at 0 (or less) everything is forgotten and nobody is kept apart."""
+    if Config.forget_mates_after <= 0:
+        mates_memory.clear()
+        return {}
     for guest in list(mates_memory.keys()):
         mates = {m: t for m, t in mates_memory[guest].items() if now - t < Config.forget_mates_after}
         if len(mates) > 0:
