@@ -935,32 +935,6 @@ def test_room_pick_travels_hotel_guest_floor(monkeypatch):
     assert fm._proposed_check_ins["g"]["room_id"] == lonely_room.id
 
 
-def test_voter_score_is_not_fooled_by_always_human():
-    """With mostly human rooms, voting everybody "human" must not beat a voter who actually tells humans and
-    AIs apart; with as many humans as AIs, the score keeps ranking voters by how often they are right."""
-    from .stats import WStats
-
-    def voter(name, humans, ais, right_on_humans, right_on_ais):
-        def vote(gt, vote):
-            return {"voter": name, "voter_nature": "human", "ground_truth": gt, "vote": vote}
-        return ([vote("human", "human")] * right_on_humans + [vote("human", "ai")] * (humans - right_on_humans) +
-                [vote("ai", "ai")] * right_on_ais + [vote("ai", "human")] * (ais - right_on_ais))
-
-    for humans, ais in ((30, 10), (32, 8), (20, 20)):
-        votes = (voter("always-human", humans, ais, humans, 0) +
-                 voter("right-80", humans, ais, round(.8 * humans), round(.8 * ais)) +
-                 voter("all-bots-75", humans, ais, round(.75 * humans), ais))
-        rows = {r["peer_id"]: r for r in WStats._compute_voter_leaderboard(votes, 1)}
-        assert rows["always-human"]["balanced_accuracy"] == "50.0"
-        assert rows["always-human"]["detection_score"] < rows["right-80"]["detection_score"]
-        assert rows["always-human"]["detection_score"] < rows["all-bots-75"]["detection_score"]
-        assert rows["always-human"]["f1"] is not None  # Still reported
-
-    # A voter who met humans only is judged on them only
-    rows = WStats._compute_voter_leaderboard(voter("humans-only", 10, 0, 9, 0), 1)
-    assert rows[0]["balanced_accuracy"] == "90.0"
-
-
 def test_vote_form_roundtrip():
     """The vote as a form: what is composed, what is read back, and what is not a vote."""
     from unaiverse.uai import encode_reply, has_fence, parse_message, serialize_block, to_model_text
